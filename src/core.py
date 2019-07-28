@@ -55,7 +55,6 @@ class tickerStater :
         self.tdf.show() 
 
         self.tdf = self.tdf.drop("site","unit") 
-        self.tdf.persist()
 
     def preprocessing(self,record) :
         for r in record :
@@ -81,13 +80,16 @@ class tickerStater :
         _tdf = self.tdf.withColumn("timespan", col("timestamp") / (60 * span))
         _tdf = _tdf.withColumn("timespan", _tdf["timespan"].cast(T.IntegerType()))
 
-        def obj(timestamp,vals) :
-            return zip(tsp,val)
+#        return _tdf.groupBy("timespan").agg(F.collect_list(F.struct("timestamp",fd)).alias("tupleseries"))
+        return self.collectintimespan(_tdf,"timespan",fd)
 
-        obj = F.udf(obj, T.StructType([T.StructField("timestamp",T.IntegerType(),True),
-                                       T.StructField("value",typ(),True)]))
-
-        return _tdf.groupBy("timespan").agg(F.collect_list(F.struct("timestamp",fd)).alias("tupleseries"))
+    def collectintimespan(self,df,keyfield,valuefield) :
+        return df.select(keyfield,F.struct("timestamp",valuefield))\
+                .rdd.map(lambda x : ( x[0] , [ x[1] ] ) )\
+                .reduceByKey(lambda x,y : x + y)\
+                .toDF()\
+                .select(ascol("_1",keyfield), 
+                        ascol("_2","tupleseries"))
 
     def actioningrouped(self,grouped,action) :
         return grouped.withColumn("result",action("tupleseries"))\
@@ -99,31 +101,65 @@ class tickerStater :
 
     def run(self,record) :
         self.initdf(record,"1")
-                
-        res = self.action(20,"tradePrice",self.netlambda)
-        res.show()
-       
-        _volumedf = self.action(20,"candleAccTradeVolume",self.sum)
+        _volumedf = self.action(180,"candleAccTradeVolume",self.sum)
+        sys.exit(1)
+
+        _volumedf = self.aselect(_volumedf,"volume")
         _volumedf.show()
 
-        res = self.retrvtimestamp(res,20)
+        res = self.action(180,"tradePrice",self.netlambda)
+        res.show()
+
+        res = self.retrvtimestamp(res,180)
         res = res.sort(col("result").desc())
 
+        res = res.join(_volumedf, _volumedf._timespan == res.timespan)\
+                .drop("_timespan")
+
+        tsps = self.taketimespans(res,15)
+        res = self.timespanaheadslide(res,tsps,10)
+    
+        self.showall(res) 
+        sys.exit(1)
+
         fres = res.filter( col("result") > 1 )
+
         fres.show(100)
         
-        _res = fres.join(_volumedf, _volumedf.timespan == fres.timespan)
+        _res = fres.sort( col("timespan").desc())
+
         _res.show() 
 
         print(res.count())
         print(fres.count())
 
-        self.tdf.unpersist()
+
+    def aselect(self,df,name) :
+        return df.select(ascol("timespan","_timespan"),
+                         ascol("result",name))
 
     def retrvtimestamp(self,tdf,minunit) :
         _tdf = tdf.withColumn("timestamp" , col("timespan") * 60 * minunit)
         return _tdf.withColumn("candleDateTime" , F.from_unixtime("timestamp").cast(T.StringType()))\
-                .sort( col("timestamp").desc() )
+                .sort(col("timestamp").desc())
+
+    def ahead(self,actiondf,timespan,count) :
+        return actiondf.filter(col("timespan") <= timespan)\
+                .filter(col("timespan") > (timespan - count))\
+                .sort(col("timespan"))
+
+    def timespanaheadslide(self,actiondf,timespans,count) :
+        return list(self.ahead(actiondf,t,count) for t in timespans)
+
+    def taketimespans(self,actiondf,count) :
+        return list(row.timespan for row in actiondf.take(count))
+   
+    def showall(self,dfs) :
+        for d in dfs :
+            d.show()
+
+def ascol(c,a) :
+    return col(c).alias(a)
 
 if __name__ == "__main__" :
 
